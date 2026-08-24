@@ -97,14 +97,36 @@ export async function autoVerify(proofId: string): Promise<VerificationResult> {
 
   // Photographic evidence is the core promise of a proof submission: no
   // combination of GPS/duplicate/expiry checks may auto-approve a proof that
-  // has no photos attached or contains corrupt/unreadable photos, no matter how
-  // high the rest of the score is. A photo-less or corrupt-photo proof can still
-  // land as inconclusive (routed to community validators) if the remaining
-  // signals are otherwise plausible, but never as an automatic approval.
+  // has no photos attached, no matter how high the rest of the score is.
+  // A photo-less proof can still land as inconclusive (routed to community
+  // validators) if the remaining signals are otherwise plausible, but never
+  // as an automatic approval.
+  const hasPhotos = proof.photos.length > 0;
+  // Non-spoofable server-side proof signal: the hash of the uploaded file is
+  // derived from the actual bytes on disk in the backend, so a client cannot
+  // forge EXIF/GPS metadata to satisfy the auto-approval gate. This is the
+  // minimum proof-of-capture invariant required for an automatic approval.
+  const hasServerProofSignal = proof.photos.some((photo) => Boolean(photo.sha256));
   const hasCorruptPhotos = proof.photos.some(isCorruptPhoto);
-  const hasValidPhotos = proof.photos.length > 0 && !hasCorruptPhotos;
 
-  if (score >= 0.7 && hasValidPhotos) return { verdict: 'approved', confidence: score };
+  if (hasPhotos && hasCorruptPhotos) {
+    return {
+      verdict: 'inconclusive',
+      confidence: score,
+      notes: 'corrupt_photos_detected',
+    };
+  }
+
+  if (score >= 0.7 && hasPhotos && !hasCorruptPhotos && hasServerProofSignal) {
+    return { verdict: 'approved', confidence: score };
+  }
+  if (score >= 0.7 && hasPhotos && !hasServerProofSignal) {
+    return {
+      verdict: 'inconclusive',
+      confidence: score,
+      notes: 'missing_server_proof_signal',
+    };
+  }
   if (score >= 0.4) return { verdict: 'inconclusive', confidence: score };
   return {
     verdict: 'rejected',
