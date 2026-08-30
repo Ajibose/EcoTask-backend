@@ -15,6 +15,7 @@ import analyticsRoutes from './routes/analytics.js';
 import auditRoutes from './routes/audit.js';
 import notificationRoutes from './routes/notifications.js';
 import adminNotificationRoutes from './routes/adminNotifications.js';
+import adminQueueRoutes from './routes/adminQueues.js';
 import validatorRoutes from './routes/validators.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { apiLimiter, authLimiter, proofLimiter } from './middleware/rateLimit.js';
@@ -29,6 +30,8 @@ import { shutdownNotificationWorker } from './workers/notificationWorker.js';
 import { stopExpirySweeper } from './workers/expiryWorker.js';
 import { stopOutboxSweeper } from './workers/notificationOutboxSweeper.js';
 import { stopRewardPayoutSweeper } from './services/rewardPayoutSweeper.js';
+import { closeAdminQueues } from './services/queueAdminService.js';
+import { redisConnectionManager } from './utils/redisConnectionManager.js';
 
 if (process.env.NODE_ENV !== 'test') {
   import('./workers/verificationWorker.js');
@@ -80,6 +83,7 @@ app.use('/analytics', analyticsRoutes);
 app.use('/audit', auditRoutes);
 app.use('/notifications', notificationRoutes);
 app.use('/admin', adminNotificationRoutes);
+app.use('/admin', adminQueueRoutes);
 app.use(validatorRoutes);
 
 app.use((_req, res) => {
@@ -105,6 +109,12 @@ async function drainWorkersAndDb(): Promise<void> {
 
   await safeStep('shut down notification worker', () => shutdownNotificationWorker());
   logger.info('Notification dispatch worker shut down');
+
+  await safeStep('close admin queue connections', () => closeAdminQueues());
+  logger.info('Admin queue connections closed');
+
+  await safeStep('close redis connection', () => redisConnectionManager.close());
+  logger.info('Redis connection closed');
 
   await safeStep('stop expiry sweeper', () => stopExpirySweeper());
   logger.info('Expiry sweeper stopped');

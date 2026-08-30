@@ -16,7 +16,7 @@ export function asyncHandler<
   Req extends Request = Request,
   Res extends Response = Response,
 >(fn: AsyncRequestHandler<Req, Res>) {
-  return (req: Req, res: Res, next: NextFunction): void => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+  return (req: Req, res: Res, next: NextFunction): Promise<void> => {
+    return Promise.resolve(fn(req, res, next)).then(() => undefined, next);
   };
 }

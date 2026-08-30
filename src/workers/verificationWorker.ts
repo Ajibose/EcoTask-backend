@@ -1,17 +1,19 @@
 import { Worker, Queue } from 'bullmq';
+import type { ConnectionOptions } from 'bullmq';
 import { autoVerify } from '../services/verificationService';
 import { notifyProofStatus } from '../services/notificationService';
-import { assignValidators } from '../services/validatorService';
+import { assignValidators, escalateToManualReview } from '../services/validatorService';
 import { claimCompletionSlot } from '../models/task';
-import config from '../config/default';
-import IORedis from 'ioredis';
 import prisma from '../utils/prisma';
 import logger from '../utils/logger';
+import { redisConnectionManager } from '../utils/redisConnectionManager.js';
 import { getRequestId, runWithRequestContext } from '../utils/requestContext.js';
 import { getQueueRetentionOptions, QUEUE_NAMES } from './queueRetention.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const connection = new IORedis(config.redis.url, { maxRetriesPerRequest: null }) as any;
+// BullMQ bundles its own ioredis, so its `ConnectionOptions` is a structurally
+// distinct type from our top-level ioredis `Redis`. The cast is purely
+// type-level: both are the same ioredis client at runtime.
+const connection = redisConnectionManager.getClient() as ConnectionOptions;
 
 const queueName = QUEUE_NAMES.proofVerification;
 const retentionOptions = getQueueRetentionOptions(queueName);
@@ -32,6 +34,7 @@ export async function enqueueVerification(proofId: string, requestId?: string) {
     'verify',
     { proofId, ...(resolvedRequestId ? { requestId: resolvedRequestId } : {}) },
     {
+      jobId: proofId,
       attempts: 3,
       backoff: { type: 'exponential', delay: 5000 },
       ...retentionOptions,
@@ -57,12 +60,21 @@ const worker = new Worker<VerificationJobData>(
           where: { id: proofId },
           select: { status: true },
         });
-        logger.info('Skipping proof already processed', {
+        const canResume =
+          existing?.status === 'VERIFYING' && job.id === proofId && job.attemptsMade > 0;
+        if (!canResume) {
+          logger.info('Skipping proof already processed', {
+            proofId,
+            status: existing?.status ?? 'UNKNOWN',
+            ...requestMeta,
+          });
+          return;
+        }
+        logger.info('Resuming incomplete proof verification attempt', {
           proofId,
-          status: existing?.status ?? 'UNKNOWN',
+          attemptsMade: job.attemptsMade,
           ...requestMeta,
         });
-        return;
       }
 
       const proof = await prisma.proof.findUnique({
@@ -159,24 +171,26 @@ const worker = new Worker<VerificationJobData>(
             assigned,
             ...requestMeta,
           });
-        } else {
-          logger.info(
-            'Proof inconclusive — no validators available, needs manual review',
-            {
-              proofId,
-              ...requestMeta,
-            },
-          );
-        }
 
-        await prisma.verification.create({
-          data: {
+          await prisma.verification.create({
+            data: {
+              proofId,
+              verifierId: 'auto-verifier',
+              verdict: result.verdict,
+              notes: result.notes || `confidence: ${result.confidence}`,
+            },
+          });
+        } else {
+          const escalated = await escalateToManualReview(
             proofId,
-            verifierId: 'auto-verifier',
-            verdict: result.verdict,
-            notes: result.notes || `confidence: ${result.confidence}`,
-          },
-        });
+            result.notes || `confidence: ${result.confidence}`,
+          );
+          logger.info('Proof inconclusive — manual review escalation evaluated', {
+            proofId,
+            escalated,
+            ...requestMeta,
+          });
+        }
       }
     });
   },
@@ -200,7 +214,6 @@ worker.on('failed', (job, err) =>
 export async function shutdownVerificationWorker(): Promise<void> {
   await worker.close();
   await verificationQueue.close();
-  await connection.quit();
   logger.info('Verification worker shut down');
 }
 
